@@ -17,7 +17,6 @@ Optional:
   export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
   export OPENROUTER_HTTP_REFERER=...
   export OPENROUTER_X_TITLE=...
-  export ENABLE_WEB_SEARCH=1   (best-effort; depends on route/provider)
 """
 
 import asyncio
@@ -35,18 +34,12 @@ from rich.markdown import Markdown
 
 SYSTEM_PROMPT = "You are a buy-side analyst."
 
-MODEL_GPT = "openai/gpt-5.1"
-MODEL_GEMINI = "google/gemini-3-pro-preview"
+# --- Web-search enabled models ---
+MODEL_GPT = "openai/gpt-5.1:online"
+MODEL_GEMINI = "google/gemini-3-pro-preview:online"
 TEMPERATURE = 0.8
 
 HistoryItem = Tuple[str, str]  # (q, final)
-
-
-def _extra_body_for_web_search() -> Dict[str, Any]:
-    # Best-effort OpenRouter pattern (not universal across providers/routes).
-    if os.getenv("ENABLE_WEB_SEARCH", "").strip().lower() in ("1", "true", "yes"):
-        return {"plugins": [{"id": "web"}]}
-    return {}
 
 
 def _build_messages(history: List[HistoryItem], user_prompt: str) -> List[BaseMessage]:
@@ -71,15 +64,12 @@ def _make_llm(model: str) -> ChatOpenAI:
     if os.getenv("OPENROUTER_X_TITLE", "").strip():
         default_headers["X-Title"] = os.getenv("OPENROUTER_X_TITLE", "").strip()
 
-    extra_body = _extra_body_for_web_search()
-
     return ChatOpenAI(
         model=model,
         temperature=TEMPERATURE,
         api_key=api_key,
         base_url=base_url,
         default_headers=default_headers or None,
-        extra_body=extra_body or None,
     )
 
 
@@ -154,12 +144,13 @@ async def main() -> int:
             _print_block(console, "GPT (First Pass)", a0, style="bold blue")
             _print_block(console, "Gemini (First Pass)", b0, style="bold green")
 
-            # Single synthesis step: GPT sees both answers and the question, and produces the final.
+            # Synthesis step: GPT sees both answers and produces the final.
             final = await synthesize_final(gpt, q, a0, b0, history)
             _print_block(console, "Final Answer", final, style="bold yellow")
 
             # Store final in history for conversational context.
             history.append((q, final))
+
         except KeyboardInterrupt:
             break
         except Exception as e:
