@@ -2,8 +2,12 @@
 """
 two_llm_synth_langchain.py
 
-Same spec/flow, but implemented with LangChain (OpenRouter OpenAI-compatible endpoint).
-Uses `rich` for conversational output.
+Simplified flow:
+  1) Ask GPT and Gemini the question.
+  2) Pass both answers to GPT as reference.
+  3) Take GPT's synthesis as the final answer.
+
+Uses LangChain (OpenRouter OpenAI-compatible endpoint) and `rich` for output.
 
 Requires:
   pip install langchain-openai langchain-core python-dotenv rich
@@ -85,47 +89,33 @@ async def invoke_with_history(llm: ChatOpenAI, question: str, history: List[Hist
     return (resp.content or "").strip()
 
 
-async def first_pass(gpt: ChatOpenAI, gemini: ChatOpenAI, q: str, history: List[HistoryItem]) -> Tuple[str, str]:
+async def first_pass(
+    gpt: ChatOpenAI,
+    gemini: ChatOpenAI,
+    q: str,
+    history: List[HistoryItem]
+) -> Tuple[str, str]:
     a0, b0 = await asyncio.gather(
         invoke_with_history(gpt, q, history),
-        invoke_with_history(gemini, q, history)
+        invoke_with_history(gemini, q, history),
     )
     return a0, b0
 
 
-async def second_pass(
+async def synthesize_final(
     gpt: ChatOpenAI,
-    gemini: ChatOpenAI,
     question: str,
     answer_a0: str,
     answer_b0: str,
     history: List[HistoryItem],
-) -> Tuple[str, str]:
+) -> str:
     prompt = f"""<text>
 {answer_a0}
 </text>
 <text>
 {answer_b0}
 </text>
-
-Based on the two texts, answer the question: {question}
-"""
-    a1, b1 = await asyncio.gather(
-        invoke_with_history(gpt, prompt, history),
-        invoke_with_history(gemini, prompt, history)
-    )
-    return a1, b1
-
-
-async def final_merge(gpt: ChatOpenAI, answer_a1: str, answer_b1: str, history: List[HistoryItem]) -> str:
-    prompt = f"""<text>
-{answer_a1}
-</text>
-<text>
-{answer_b1}
-</text>
-
-Merge the two texts.
+The two texts are for your reference. Answer the question: {question}
 """
     return await invoke_with_history(gpt, prompt, history)
 
@@ -159,15 +149,16 @@ async def main() -> int:
             break
 
         try:
+            # First pass: both models answer the question.
             a0, b0 = await first_pass(gpt, gemini, q, history)
             _print_block(console, "GPT (First Pass)", a0, style="bold blue")
             _print_block(console, "Gemini (First Pass)", b0, style="bold green")
-            a1, b1 = await second_pass(gpt, gemini, q, a0, b0, history)
-            _print_block(console, "GPT (Second Pass)", a1, style="blue")
-            _print_block(console, "Gemini (Second Pass)", b1, style="green")
-            final = await final_merge(gpt, a1, b1, history)
+
+            # Single synthesis step: GPT sees both answers and the question, and produces the final.
+            final = await synthesize_final(gpt, q, a0, b0, history)
             _print_block(console, "Final Answer", final, style="bold yellow")
 
+            # Store final in history for conversational context.
             history.append((q, final))
         except KeyboardInterrupt:
             break
