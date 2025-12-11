@@ -22,8 +22,7 @@ Optional:
 import asyncio
 import os
 import sys
-import signal
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 from langchain_openai import ChatOpenAI
@@ -34,10 +33,10 @@ from rich.markdown import Markdown
 
 SYSTEM_PROMPT = "You are a buy-side analyst."
 
-# --- Web-search enabled models ---
-MODEL_GPT = "openai/gpt-5.1:online"
-MODEL_GEMINI = "google/gemini-3-pro-preview:online"
-TEMPERATURE = 0.8
+# --- Model variants ---
+MODEL_GPT_BASE = "openai/gpt-5.2"
+MODEL_GEMINI_BASE = "google/gemini-3-pro-preview"
+TEMPERATURE = 0.7
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
@@ -51,7 +50,7 @@ def _build_messages(history: List[HistoryItem], user_prompt: str) -> List[BaseMe
     return msgs
 
 
-def _make_llm(model: str) -> ChatOpenAI:
+def _make_llm(model: str, thinking: bool = False, web_search: bool = True) -> ChatOpenAI:
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required.")
@@ -64,19 +63,33 @@ def _make_llm(model: str) -> ChatOpenAI:
     if os.getenv("OPENROUTER_X_TITLE", "").strip():
         default_headers["X-Title"] = os.getenv("OPENROUTER_X_TITLE", "").strip()
 
+    # Reasoning config: "high" effort when /think is used, otherwise disabled
+    reasoning_config = {"effort": "high"} if thinking else None
+
+    # Web search tool config
+    model_kwargs = {"tools": [{"type": "web_search"}]} if web_search else {}
+
     return ChatOpenAI(
         model=model,
         temperature=TEMPERATURE,
         api_key=api_key,
         base_url=base_url,
         default_headers=default_headers or None,
+        use_responses_api=True,
+        reasoning=reasoning_config,
+        model_kwargs=model_kwargs,
     )
 
 
 async def invoke_with_history(llm: ChatOpenAI, question: str, history: List[HistoryItem]) -> str:
     messages = _build_messages(history, question)
     resp = await llm.ainvoke(messages)
-    return (resp.content or "").strip()
+    content = resp.content
+    # Handle Responses API: content can be a list of blocks
+    if isinstance(content, list):
+        text_parts = [block.get("text", "") for block in content if isinstance(block, dict)]
+        content = "\n".join(text_parts)
+    return (content or "").strip()
 
 
 async def first_pass(
@@ -99,13 +112,16 @@ async def synthesize_final(
     answer_b0: str,
     history: List[HistoryItem],
 ) -> str:
-    prompt = f"""<text>
+    prompt = f"""<prompt>
+{question}
+</prompt>
+<response>
 {answer_a0}
-</text>
-<text>
+</response>
+<response>
 {answer_b0}
-</text>
-The two texts are for your reference. Answer the question: {question}
+</response>
+Respond to the prompt based on the two responses
 """
     return await invoke_with_history(gpt, prompt, history)
 
@@ -117,26 +133,36 @@ def _print_block(console: Console, title: str, text: str, style: str = "white") 
 async def main() -> int:
     load_dotenv()
     console = Console()
-    gpt = _make_llm(MODEL_GPT)
-    gemini = _make_llm(MODEL_GEMINI)
 
     history: List[HistoryItem] = []
 
-    def handle_sigint(_sig, _frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, handle_sigint)
-
     while True:
         try:
-            q = input().strip()
+            raw = input().strip()
         except EOFError:
             break
         except KeyboardInterrupt:
             break
 
-        if not q or q.lower() in ("exit", "quit"):
+        if not raw or raw.lower() in ("exit", "quit"):
             break
+
+        # Check for /think prefix to enable reasoning mode
+        thinking_mode = raw.startswith("/think")
+        if thinking_mode:
+            q = raw[6:].strip()  # Remove "/think" prefix
+            if not q:
+                console.print("[yellow]Usage: /think <your question>[/yellow]")
+                continue
+            console.print("[bold magenta]🧠 Reasoning mode enabled[/bold magenta]")
+        else:
+            q = raw
+
+        # Build LLMs with web search via tools API, reasoning enabled if /think
+        gpt = _make_llm(MODEL_GPT_BASE, thinking_mode)
+        gemini = _make_llm(MODEL_GEMINI_BASE, thinking_mode)
+        # Synthesis GPT: no web search or reasoning (already has reference answers)
+        gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False)
 
         try:
             # First pass: both models answer the question.
@@ -145,7 +171,7 @@ async def main() -> int:
             _print_block(console, "Gemini (First Pass)", b0, style="bold green")
 
             # Synthesis step: GPT sees both answers and produces the final.
-            final = await synthesize_final(gpt, q, a0, b0, history)
+            final = await synthesize_final(gpt_synth, q, a0, b0, history)
             _print_block(console, "Final Answer", final, style="bold yellow")
 
             # Store final in history for conversational context.
