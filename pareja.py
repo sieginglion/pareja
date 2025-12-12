@@ -121,7 +121,7 @@ async def synthesize_final(
 <response>
 {answer_b0}
 </response>
-Respond to the prompt based on the two responses
+Here are two responses to the prompt. Generate a final one based on them
 """
     return await invoke_with_history(gpt, prompt, history)
 
@@ -139,12 +139,10 @@ async def main() -> int:
     while True:
         try:
             raw = input().strip()
-        except EOFError:
-            break
         except KeyboardInterrupt:
             break
 
-        if not raw or raw.lower() in ("exit", "quit"):
+        if not raw or raw.lower() == "q":
             break
 
         # Check for /think prefix to enable reasoning mode
@@ -177,8 +175,9 @@ async def main() -> int:
             # Store final in history for conversational context.
             history.append((q, final))
 
-        except KeyboardInterrupt:
-            break
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            console.print("\n[red]Request cancelled[/red]")
+            continue
         except Exception as e:
             print(f"\nERROR: {type(e).__name__}: {e}", file=sys.stderr)
 
