@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """
-two_llm_synth_langchain.py
+two_llm_synth_chainlit.py
 
 Simplified flow:
   1) Ask GPT and Gemini the question.
   2) Pass both answers to GPT as reference.
   3) Take GPT's synthesis as the final answer.
 
-Uses LangChain (OpenRouter OpenAI-compatible endpoint) and `rich` for output.
+Uses Chainlit for the UI and LangChain for LLM calls.
 
 Requires:
-  pip install langchain-openai langchain-core python-dotenv rich
+  pip install langchain-openai langchain-core python-dotenv chainlit
   export OPENROUTER_API_KEY=...
-
-Optional:
-  export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-  export OPENROUTER_HTTP_REFERER=...
-  export OPENROUTER_X_TITLE=...
 """
 
 import asyncio
 import os
-import sys
 from typing import List, Tuple, Dict
 
+import chainlit as cl
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
-from rich.console import Console
-from rich.panel import Panel
-from rich.markdown import Markdown
+
+# Load env immediately
+load_dotenv()
 
 SYSTEM_PROMPT = "You are a buy-side analyst."
 
@@ -40,7 +35,6 @@ TEMPERATURE = 0.7
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
-
 def _build_messages(history: List[HistoryItem], user_prompt: str) -> List[BaseMessage]:
     msgs: List[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
     for q, a in history:
@@ -48,7 +42,6 @@ def _build_messages(history: List[HistoryItem], user_prompt: str) -> List[BaseMe
         msgs.append(AIMessage(content=a))
     msgs.append(HumanMessage(content=user_prompt))
     return msgs
-
 
 def _make_llm(model: str, thinking: bool = False, web_search: bool = True) -> ChatOpenAI:
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -80,17 +73,17 @@ def _make_llm(model: str, thinking: bool = False, web_search: bool = True) -> Ch
         model_kwargs=model_kwargs,
     )
 
-
 async def invoke_with_history(llm: ChatOpenAI, question: str, history: List[HistoryItem]) -> str:
     messages = _build_messages(history, question)
     resp = await llm.ainvoke(messages)
     content = resp.content
+    print(f"DEBUG: invoking {llm.model_name}, raw_content type={type(content)}")
+    
     # Handle Responses API: content can be a list of blocks
     if isinstance(content, list):
         text_parts = [block.get("text", "") for block in content if isinstance(block, dict)]
         content = "\n".join(text_parts)
     return (content or "").strip()
-
 
 async def first_pass(
     gpt: ChatOpenAI,
@@ -98,12 +91,12 @@ async def first_pass(
     q: str,
     history: List[HistoryItem]
 ) -> Tuple[str, str]:
+    # Run both distinct models in parallel
     a0, b0 = await asyncio.gather(
         invoke_with_history(gpt, q, history),
         invoke_with_history(gemini, q, history),
     )
     return a0, b0
-
 
 async def synthesize_final(
     gpt: ChatOpenAI,
@@ -126,66 +119,59 @@ Here are two responses to the prompt. Generate a final one based on them
     return await invoke_with_history(gpt, prompt, history)
 
 
-def _print_block(console: Console, title: str, text: str, style: str = "white") -> None:
-    console.print(Panel(Markdown(text), title=title, style=style))
+@cl.on_chat_start
+def start():
+    # Initialize history in user session
+    cl.user_session.set("history", [])
 
+@cl.on_message
+async def main(message: cl.Message):
+    history = cl.user_session.get("history")
+    
+    raw = message.content.strip()
+    
+    # Check for /think prefix
+    thinking_mode = raw.startswith("/think")
+    if thinking_mode:
+        q = raw[6:].strip()
+        if not q:
+            await cl.Message(content="Usage: /think <your question>").send()
+            return
+        await cl.Message(content="🧠 **Reasoning mode enabled**").send()
+    else:
+        q = raw
 
-async def main() -> int:
-    load_dotenv()
-    console = Console()
+    # Build LLMs
+    gpt = _make_llm(MODEL_GPT_BASE, thinking_mode)
+    gemini = _make_llm(MODEL_GEMINI_BASE, thinking_mode)
+    gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False)
 
-    history: List[HistoryItem] = []
+    # Step 1: First Pass
+    async with cl.Step(name="Step 1") as step:
+        a0, b0 = await first_pass(gpt, gemini, q, history)
+        step.output = f'# gpt\n{a0}\n# gemini\n{b0}'
 
-    while True:
-        try:
-            raw = input().strip()
-        except KeyboardInterrupt:
-            break
+    # Send intermediate outputs as their own messages if preferred, 
+    # but Elements are cleaner for "First Pass" content to avoid clutter.
+    # However, the user might want to see them directly.
+    # Let's send them as collapsible messages (Actions) or just simple Messages?
+    # The requirement is just "interface".
+    
+    # Let's pop out the answers as well so they are visible in the chat stream 
+    # but maybe in a cleaner way. 
+    # Actually, appending them to the next message or just showing them above.
+    
+    # The intermediate answers are already shown via the inline Text elements attached to the step.
+    # explicit message removed to avoid duplication.
 
-        if not raw or raw.lower() == "q":
-            break
+    # Step 2: Synthesis
+    async with cl.Step(name="Step 2") as step:
+        final = await synthesize_final(gpt_synth, q, a0, b0, history)
+        step.output = "Done"
 
-        # Check for /think prefix to enable reasoning mode
-        thinking_mode = raw.startswith("/think")
-        if thinking_mode:
-            q = raw[6:].strip()  # Remove "/think" prefix
-            if not q:
-                console.print("[yellow]Usage: /think <your question>[/yellow]")
-                continue
-            console.print("[bold magenta]🧠 Reasoning mode enabled[/bold magenta]")
-        else:
-            q = raw
+    # Final Answer
+    await cl.Message(content=final).send()
 
-        # Build LLMs with web search via tools API, reasoning enabled if /think
-        gpt = _make_llm(MODEL_GPT_BASE, thinking_mode)
-        gemini = _make_llm(MODEL_GEMINI_BASE, thinking_mode)
-        # Synthesis GPT: no web search or reasoning (already has reference answers)
-        gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False)
-
-        try:
-            # First pass: both models answer the question.
-            a0, b0 = await first_pass(gpt, gemini, q, history)
-            _print_block(console, "GPT (First Pass)", a0, style="bold blue")
-            _print_block(console, "Gemini (First Pass)", b0, style="bold green")
-
-            # Synthesis step: GPT sees both answers and produces the final.
-            final = await synthesize_final(gpt_synth, q, a0, b0, history)
-            _print_block(console, "Final Answer", final, style="bold yellow")
-
-            # Store final in history for conversational context.
-            history.append((q, final))
-
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            console.print("\n[red]Request cancelled[/red]")
-            continue
-        except Exception as e:
-            print(f"\nERROR: {type(e).__name__}: {e}", file=sys.stderr)
-
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(asyncio.run(main()))
-    except KeyboardInterrupt:
-        sys.exit(0)
+    # Update History
+    history.append((q, final))
+    cl.user_session.set("history", history)

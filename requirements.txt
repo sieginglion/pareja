@@ -1,4 +1,5 @@
 langchain-openai
 langchain-core
 python-dotenv
-rich
+
+chainlit
