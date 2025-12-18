@@ -279,7 +279,7 @@ async def synthesize_final(
 <response model="grok">
 {answer_c0}
 </response>
-The above are three responses to the prompt. Generate a final one based on them. If there are major conflicts, list them.
+The above are three responses to the prompt. Merge them. If there are major conflicts, list them.
 """
     # For synthesis, we can use the same invoke_gpt mechanism
     # web_search=False for synthesis usually
@@ -318,7 +318,7 @@ async def main(message: cl.Message):
     
     gemini_model = MODEL_GEMINI_REASONING if thinking_mode else MODEL_GEMINI_BASE
 
-    gpt_reasoning = "xhigh" if thinking_mode else "none"
+    gpt_reasoning = "high" if thinking_mode else "none"
 
     # gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False) # No longer used
 
