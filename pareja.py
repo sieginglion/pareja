@@ -7,7 +7,7 @@ Simplified flow:
   2) Pass both answers to GPT as reference.
   3) Take GPT's synthesis as the final answer.
 
-Uses Chainlit for the UI and LangChain for LLM calls.
+Uses Chainlit for the UI.
 
 Requires:
   pip install langchain-openai langchain-core python-dotenv chainlit
@@ -19,17 +19,12 @@ import os
 from typing import List, Tuple, Dict
 
 import chainlit as cl
-from openai import OpenAI
-try:
-    from xai_sdk import AsyncClient, Client
-    from xai_sdk.chat import user, system, assistant
-    from xai_sdk.tools import x_search, web_search
-    from google import genai
-    from google.genai import types
-
-except ImportError:
-    # Fallback or strict requirement? Plan implied strict but let's be safe or just standard import
-    pass 
+from openai import AsyncOpenAI
+from xai_sdk import AsyncClient, Client
+from xai_sdk.chat import user, system, assistant
+from xai_sdk.tools import x_search, web_search as xai_web_search
+from google import genai
+from google.genai import types 
 from dotenv import load_dotenv
 
 # Load env immediately
@@ -47,7 +42,7 @@ MODEL_GROK_REASONING = "grok-4-1-fast-reasoning"
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
-def invoke_gpt(
+async def invoke_gpt(
     model: str,
     question: str,
     history: List[HistoryItem],
@@ -55,14 +50,14 @@ def invoke_gpt(
     reasoning_effort: str = None
 ) -> Tuple[str, int]:
     """
-    Invoke GPT using OpenAI SDK responses.create
+    Invoke GPT using AsyncOpenAI SDK responses.create
     """
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     
     if not api_key:
         return "Error: OPENAI_API_KEY is required.", 0
         
-    client = OpenAI(
+    client = AsyncOpenAI(
         api_key=api_key
     )
     
@@ -76,35 +71,40 @@ def invoke_gpt(
     
     messages.append({"role": "user", "content": question})
     
-    # Tools config
-    tools = [{"type": "web_search"}] if web_search else None
-    
-    # Reasoning config
-    reasoning = {"effort": reasoning_effort} if reasoning_effort else None
+    # Build kwargs dynamically to omit tools if not needed (best practice)
+    create_kwargs = {
+        "model": model,
+        "input": messages,
+    }
+
+    if web_search:
+        create_kwargs["tools"] = [{"type": "web_search"}]
+
+    if reasoning_effort:
+        create_kwargs["reasoning"] = {"effort": reasoning_effort}
 
     try:
         # Note: 'responses' is experimental/specific to the user's provider (OpenAI-next)
-        # We assume client.responses.create exists and matches the user's snippet.
-        response = client.responses.create(
-            model=model,
-            tools=tools,
-            input=messages,
-            reasoning=reasoning
-        )
+        response = await client.responses.create(**create_kwargs)
+        
         # Accessing output_text as per user example
         text = getattr(response, 'output_text', str(response))
         
-        # Extract reasoning tokens (OpenAI style)
+        # Extract reasoning tokens (OpenAI Responses API style)
+        # Usage is typically response.usage
         usage = getattr(response, 'usage', None)
         reasoning_tokens = 0
         if usage:
-            # Common OpenAI structure: usage.completion_tokens_details.reasoning_tokens
-            details = getattr(usage, 'completion_tokens_details', None)
-            if details:
-                reasoning_tokens = getattr(details, 'reasoning_tokens', 0)
-            else:
-                # Fallback for Some providers: usage.reasoning_tokens
-                reasoning_tokens = getattr(usage, 'reasoning_tokens', 0)
+            # Check output_tokens_details first (Responses API standard)
+            output_details = getattr(usage, 'output_tokens_details', None)
+            completion_details = getattr(usage, 'completion_tokens_details', None) # Fallback
+
+            if output_details and hasattr(output_details, 'reasoning_tokens'):
+                reasoning_tokens = output_details.reasoning_tokens
+            elif completion_details and hasattr(completion_details, 'reasoning_tokens'):
+                reasoning_tokens = completion_details.reasoning_tokens
+            elif hasattr(usage, 'reasoning_tokens'):
+                reasoning_tokens = usage.reasoning_tokens
         
         return text, reasoning_tokens
     except Exception as e:
@@ -122,53 +122,50 @@ async def invoke_grok(
     """
     api_key = os.getenv("XAI_API_KEY", "").strip()
     if not api_key:
-        return "Error: XAI_API_KEY not found."
+        return "Error: XAI_API_KEY not found.", 0
 
-    client = AsyncClient(api_key=api_key)
-    
-    # Tools
-    tools = []
-    if web_search:
-        # Enable image understanding only when thinking (reasoning_effort is set)
-        image_understanding = reasoning_effort is not None
-        tools.append(web_search(enable_image_understanding=image_understanding))
-        tools.append(x_search(enable_image_understanding=image_understanding))
-    
-    # Reconstruct history for Grok
-    # xAI SDK chat expects a specific history object or methods to append.
-    # It seems we create a chat session.
-    create_kwargs = {
-        "model": model,
-        "tools": tools,
-    }
-    if reasoning_effort:
-        create_kwargs["reasoning_effort"] = reasoning_effort
+    async with AsyncClient(api_key=api_key) as client:
+        # Tools
+        tools = []
+        if web_search:
+            # Enable image understanding only when thinking (reasoning_effort is set)
+            image_understanding = reasoning_effort is not None
+            tools.append(xai_web_search(enable_image_understanding=image_understanding))
+            tools.append(x_search(enable_image_understanding=image_understanding))
+        
+        # Reconstruct history for Grok
+        create_kwargs = {
+            "model": model,
+            "tools": tools,
+        }
+        if reasoning_effort and reasoning_effort != "none":
+            create_kwargs["reasoning_effort"] = reasoning_effort
 
-    chat = client.chat.create(**create_kwargs)
-    
-    # Add system prompt
-    chat.append(system(SYSTEM_PROMPT))
-    
-    for q_hist, a_hist in history:
-        chat.append(user(q_hist))
-        chat.append(assistant(a_hist))
+        chat = client.chat.create(**create_kwargs)
         
-    chat.append(user(question))
-    
-    # print(f"DEBUG: invoking Grok {model}...")
-    try:
-        response = await chat.sample()
-        text = response.content.strip() if response.content else ""
+        # Add system prompt
+        chat.append(system(SYSTEM_PROMPT))
         
-        # Extract tokens from Grok (xAI SDK)
-        usage = getattr(response, 'usage', None)
-        reasoning_tokens = 0
-        if usage:
-            reasoning_tokens = getattr(usage, 'reasoning_tokens', 0)
+        for q_hist, a_hist in history:
+            chat.append(user(q_hist))
+            chat.append(assistant(a_hist))
             
-        return text, reasoning_tokens
-    except Exception as e:
-        return f"Error invoking Grok: {e}", 0
+        chat.append(user(question))
+        
+        # print(f"DEBUG: invoking Grok {model}...")
+        try:
+            response = await chat.sample()
+            text = response.content.strip() if response.content else ""
+            
+            # Extract tokens from Grok (xAI SDK)
+            usage = getattr(response, 'usage', None)
+            reasoning_tokens = 0
+            if usage:
+                reasoning_tokens = getattr(usage, 'reasoning_tokens', 0)
+                
+            return text, reasoning_tokens
+        except Exception as e:
+            return f"Error invoking Grok: {e}", 0
 
 async def invoke_gemini(
     model: str,
@@ -197,11 +194,15 @@ async def invoke_gemini(
     # Configuration
     # thinking_level: 'high' if thinking_mode else 'minimal'
     # Note: 'minimal' might warn but is the requested setting for low reasoning.
-    t_level = "high" if thinking_mode else "minimal"
+    # Configuration
+    # thinking_level: 'high' if thinking_mode else 'minimal'
+    # Use types.ThinkingLevel enum as per feedback
+    t_level = types.ThinkingLevel.HIGH if thinking_mode else "minimal"
     
     config = types.GenerateContentConfig(
         tools=tools,
-        thinking_config=types.ThinkingConfig(thinking_level=t_level)
+        thinking_config=types.ThinkingConfig(thinking_level=t_level),
+        system_instruction=SYSTEM_PROMPT
     )
     
     # Construct History + Prompt
@@ -211,8 +212,7 @@ async def invoke_gemini(
     
     # Simple prompt construction as seen in test script, but preserving history context:
     full_prompt = ""
-    if SYSTEM_PROMPT:
-        full_prompt += f"System: {SYSTEM_PROMPT}\n\n"
+    # System prompt is now in config, no need to prepend here manually
     
     for q_h, a_h in history:
         full_prompt += f"User: {q_h}\nModel: {a_h}\n\n"
@@ -220,29 +220,20 @@ async def invoke_gemini(
     full_prompt += f"User: {question}"
 
     try:
-        # We wrap in to_thread if it was blocking, but the new SDK might support async?
-        # The new SDK has an async client too usually, but 'genai.Client' is sync?
-        # Re-checking imports.. 'from google import genai'. 
-        # The documentation showed `client.models.generate_content`.
-        # To be safe with async loop, we'll run it in a thread or check for async client.
-        # The test script used sync `client`. `pareja.py` is async.
-        # Let's wrap in to_thread.
+        # Use native async client.aio
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=full_prompt,
+            config=config
+        )
         
-        def _run_gemini():
-            response = client.models.generate_content(
-                model=model,
-                contents=full_prompt,
-                config=config
-            )
-            # Extract text and thoughts_token_count
-            text = response.text
-            usage = getattr(response, 'usage_metadata', None)
-            reasoning_tokens = 0
-            if usage:
-                reasoning_tokens = getattr(usage, 'thoughts_token_count', 0)
-            return text, reasoning_tokens
-
-        return await asyncio.to_thread(_run_gemini)
+        # Extract text and thoughts_token_count
+        text = response.text
+        usage = getattr(response, 'usage_metadata', None)
+        reasoning_tokens = 0
+        if usage:
+            reasoning_tokens = getattr(usage, 'thoughts_token_count', 0)
+        return text, reasoning_tokens
 
     except Exception as e:
         return f"Error invoking Gemini: {e}", 0
@@ -261,7 +252,7 @@ async def first_pass(
     # Note: invoke_gpt is synchronous in the user example (client.responses.create)
     # wraps in to_thread for non-blocking async
     a0, b0, c0 = await asyncio.gather(
-        asyncio.to_thread(invoke_gpt, gpt_model_name, q, history, web_search=True, reasoning_effort=gpt_reasoning_effort),
+        invoke_gpt(gpt_model_name, q, history, web_search=True, reasoning_effort=gpt_reasoning_effort),
         invoke_gemini(gemini_model, q, history, gemini_thinking),
         invoke_grok(grok_model_name, q, history, web_search=True, reasoning_effort=grok_reasoning_effort)
     )
@@ -279,20 +270,20 @@ async def synthesize_final(
     prompt = f"""<prompt>
 {question}
 </prompt>
-<response model="GPT">
+<response model="gpt">
 {answer_a0}
 </response>
-<response model="Gemini">
+<response model="gemini">
 {answer_b0}
 </response>
-<response model="Grok">
+<response model="grok">
 {answer_c0}
 </response>
-Here are three responses to the prompt. Generate a final one based on them
+The above are three responses to the prompt. Generate a final one based on them. If there are major conflicts, list them.
 """
     # For synthesis, we can use the same invoke_gpt mechanism
     # web_search=False for synthesis usually
-    text, _ = await asyncio.to_thread(invoke_gpt, gpt_model, prompt, history, web_search=False, reasoning_effort=reasoning_effort)
+    text, _ = await invoke_gpt(gpt_model, prompt, history, web_search=False, reasoning_effort=reasoning_effort)
     return text
 
 
@@ -327,7 +318,7 @@ async def main(message: cl.Message):
     
     gemini_model = MODEL_GEMINI_REASONING if thinking_mode else MODEL_GEMINI_BASE
 
-    gpt_reasoning = "xhigh" if thinking_mode else None
+    gpt_reasoning = "xhigh" if thinking_mode else "none"
 
     # gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False) # No longer used
 
@@ -354,7 +345,7 @@ async def main(message: cl.Message):
 
     # Step 2: Synthesis
     async with cl.Step(name="Step 2") as step:
-        final = await synthesize_final(MODEL_GPT_BASE, q, a0, b0, c0, history, reasoning_effort=gpt_reasoning)
+        final = await synthesize_final(MODEL_GPT_BASE, q, a0, b0, c0, history, reasoning_effort="none")
         step.output = "Done"
 
     # Final Answer
