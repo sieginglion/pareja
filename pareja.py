@@ -42,6 +42,32 @@ MODEL_GROK_REASONING = "grok-4-1-fast-reasoning"
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
+def _openai_to_tuples(messages: List[Dict[str, str]]) -> List[HistoryItem]:
+    history = []
+    current_user = None
+    current_assistant = None
+    
+    for m in messages:
+        if m['role'] == 'user':
+            # If we were building a turn, save it
+            if current_user is not None and current_assistant is not None:
+                history.append((current_user, current_assistant))
+            
+            # Start new turn
+            current_user = m['content']
+            current_assistant = None
+            
+        elif m['role'] == 'assistant':
+            # If we have a user message waiting, update the answer
+            # This ensures we get the *last* assistant message (e.g. ignoring intermediate steps if present)
+            current_assistant = m['content']
+                
+    # Append the final turn if complete
+    if current_user is not None and current_assistant is not None:
+        history.append((current_user, current_assistant))
+        
+    return history
+
 async def invoke_gpt(
     model: str,
     question: str,
@@ -205,25 +231,36 @@ async def invoke_gemini(
         system_instruction=SYSTEM_PROMPT
     )
     
-    # Construct History + Prompt
-    # Gemini SDK history is usually handled by keeping a chat session or passing contents list.
-    # We'll concatenate for simplicity or use role-based contents if supported nicely.
-    # For 'generate_content', we can pass a list of parts/messages.
+    # Construct History + Prompt using structured Content objects
+    # Convert OpenAI-style history to Google GenAI Content objects
+    contents = []
     
-    # Simple prompt construction as seen in test script, but preserving history context:
-    full_prompt = ""
-    # System prompt is now in config, no need to prepend here manually
+    # System prompt is handled via config, so we skip it if it was in history (though cl.chat_context usually doesn't include system)
     
     for q_h, a_h in history:
-        full_prompt += f"User: {q_h}\nModel: {a_h}\n\n"
+        role_u = "user"
+        role_m = "model"
+        
+        contents.append(types.Content(
+            role=role_u,
+            parts=[types.Part(text=q_h)]
+        ))
+        contents.append(types.Content(
+            role=role_m,
+            parts=[types.Part(text=a_h)]
+        ))
     
-    full_prompt += f"User: {question}"
+    # Add the current question
+    contents.append(types.Content(
+        role="user",
+        parts=[types.Part(text=question)]
+    ))
 
     try:
         # Use native async client.aio
         response = await client.aio.models.generate_content(
             model=model,
-            contents=full_prompt,
+            contents=contents,
             config=config
         )
         
@@ -289,12 +326,15 @@ The above are three responses to the prompt. Merge them. If there are major conf
 
 @cl.on_chat_start
 def start():
-    # Initialize history in user session
-    cl.user_session.set("history", [])
+    # No manual history initialization needed
+    pass
 
 @cl.on_message
 async def main(message: cl.Message):
-    history = cl.user_session.get("history")
+    # Get history from Chainlit context (handles edits)
+    openai_history = cl.chat_context.to_openai()
+    history = _openai_to_tuples(openai_history)
+    print(f"DEBUG HISTORY: {history}")
     
     raw = message.content.strip()
     
@@ -350,7 +390,3 @@ async def main(message: cl.Message):
 
     # Final Answer
     await cl.Message(content=final).send()
-
-    # Update History
-    history.append((q, final))
-    cl.user_session.set("history", history)
