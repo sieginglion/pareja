@@ -385,7 +385,7 @@ async def main(message: cl.Message):
 
     # Step 2: Synthesis
     async with cl.Step(name="Step 2") as step:
-        final = await synthesize_final(MODEL_GPT_BASE, q, a0, b0, c0, history, reasoning_effort="none")
+        final = await synthesize_final(MODEL_GPT_BASE, q, a0, b0, c0, history, reasoning_effort=gpt_reasoning)
         step.output = "Done"
 
     # Final Answer
