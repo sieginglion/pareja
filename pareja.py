@@ -358,7 +358,7 @@ async def main(message: cl.Message):
     
     gemini_model = MODEL_GEMINI_REASONING if thinking_mode else MODEL_GEMINI_BASE
 
-    gpt_reasoning = "high" if thinking_mode else "none"
+    gpt_reasoning = "medium" if thinking_mode else "none"
 
     # gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False) # No longer used
 
