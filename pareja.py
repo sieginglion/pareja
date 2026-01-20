@@ -158,10 +158,8 @@ async def invoke_grok(
         # Tools
         tools = []
         if web_search:
-            # Enable image understanding only when thinking (reasoning_effort is set)
-            image_understanding = reasoning_effort is not None
-            tools.append(xai_web_search(enable_image_understanding=image_understanding))
-            tools.append(x_search(enable_image_understanding=image_understanding))
+            tools.append(xai_web_search())
+            tools.append(x_search())
 
         # Reconstruct history for Grok
         create_kwargs = {
