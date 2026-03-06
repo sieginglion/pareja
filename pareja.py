@@ -35,9 +35,8 @@ SYSTEM_PROMPT = "You are a buy-side analyst."
 
 # --- Model variants ---
 # --- Model variants ---
-MODEL_GPT_BASE = "gpt-5.2"
-MODEL_GEMINI_BASE = "gemini-3-flash-preview"
-MODEL_GEMINI_REASONING = "gemini-3-pro-preview"
+MODEL_GPT_BASE = "gpt-5.4"
+MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
 MODEL_GROK_REASONING = "grok-4-1-fast-reasoning"
 
@@ -88,8 +87,8 @@ async def invoke_gpt(
 
     client = AsyncOpenAI(api_key=api_key)
 
-    # Format input as messages list
-    messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Keep conversation state client-side; pass system guidance via top-level instructions.
+    messages: List[Dict[str, str]] = []
 
     if history:
         for h_q, h_a in history:
@@ -101,6 +100,7 @@ async def invoke_gpt(
     # Build kwargs dynamically to omit tools if not needed (best practice)
     create_kwargs = {
         "model": model,
+        "instructions": SYSTEM_PROMPT,
         "input": messages,
     }
 
@@ -220,13 +220,9 @@ async def invoke_gemini(
     if web_search:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-    # Configuration
-    # thinking_level: 'high' if thinking_mode else 'minimal'
-    # Note: 'minimal' might warn but is the requested setting for low reasoning.
-    # Configuration
-    # thinking_level: 'high' if thinking_mode else 'minimal'
-    # Use types.ThinkingLevel enum as per feedback
-    t_level = types.ThinkingLevel.HIGH if thinking_mode else "minimal"
+    t_level = (
+        types.ThinkingLevel.HIGH if thinking_mode else types.ThinkingLevel.LOW
+    )
 
     config = types.GenerateContentConfig(
         tools=tools,
@@ -360,12 +356,10 @@ async def main(message: cl.Message):
 
     # Build LLMs
     # gpt = _make_llm(MODEL_GPT_BASE, thinking_mode) # NO longer used via LangChain
-    # gemini = _make_llm(MODEL_GEMINI_BASE, thinking_mode) # NO longer used via LangChain
+    # gemini = _make_llm(MODEL_GEMINI, thinking_mode) # NO longer used via LangChain
 
     grok_model = MODEL_GROK_REASONING if thinking_mode else MODEL_GROK_BASE
     grok_reasoning = "high" if thinking_mode else None
-
-    gemini_model = MODEL_GEMINI_REASONING if thinking_mode else MODEL_GEMINI_BASE
 
     gpt_reasoning = "medium" if thinking_mode else "none"
 
@@ -376,7 +370,7 @@ async def main(message: cl.Message):
         res_a0, res_b0, res_c0 = await first_pass(
             MODEL_GPT_BASE,
             gpt_reasoning,
-            gemini_model,
+            MODEL_GEMINI,
             thinking_mode,
             grok_model,
             grok_reasoning,
