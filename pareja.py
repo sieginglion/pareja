@@ -38,7 +38,6 @@ SYSTEM_PROMPT = "You are a buy-side analyst."
 MODEL_GPT_BASE = "gpt-5.4"
 MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
-MODEL_GROK_REASONING = "grok-4-1-fast-reasoning"
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
@@ -145,7 +144,6 @@ async def invoke_grok(
     question: str,
     history: List[HistoryItem],
     web_search: bool = True,
-    reasoning_effort: str = None,
 ) -> Tuple[str, int]:
     """
     Invoke Grok using xAI SDK directly.
@@ -166,8 +164,6 @@ async def invoke_grok(
             "model": model,
             "tools": tools,
         }
-        if reasoning_effort and reasoning_effort != "none":
-            create_kwargs["reasoning_effort"] = reasoning_effort
 
         chat = client.chat.create(**create_kwargs)
 
@@ -270,7 +266,6 @@ async def first_pass(
     gemini_model: str,
     gemini_thinking: bool,
     grok_model_name: str,
-    grok_reasoning_effort: str,
     q: str,
     history: List[HistoryItem],
 ) -> Tuple[Tuple[str, int], Tuple[str, int], Tuple[str, int]]:
@@ -291,7 +286,6 @@ async def first_pass(
             q,
             history,
             web_search=True,
-            reasoning_effort=grok_reasoning_effort,
         ),
     )
     return a0, b0, c0
@@ -358,8 +352,7 @@ async def main(message: cl.Message):
     # gpt = _make_llm(MODEL_GPT_BASE, thinking_mode) # NO longer used via LangChain
     # gemini = _make_llm(MODEL_GEMINI, thinking_mode) # NO longer used via LangChain
 
-    grok_model = MODEL_GROK_REASONING if thinking_mode else MODEL_GROK_BASE
-    grok_reasoning = "high" if thinking_mode else None
+    grok_model = MODEL_GROK_BASE
 
     gpt_reasoning = "medium" if thinking_mode else "none"
 
@@ -373,7 +366,6 @@ async def main(message: cl.Message):
             MODEL_GEMINI,
             thinking_mode,
             grok_model,
-            grok_reasoning,
             q,
             history,
         )
