@@ -216,9 +216,7 @@ async def invoke_gemini(
     if web_search:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-    t_level = (
-        types.ThinkingLevel.HIGH if thinking_mode else types.ThinkingLevel.LOW
-    )
+    t_level = types.ThinkingLevel.HIGH if thinking_mode else types.ThinkingLevel.LOW
 
     config = types.GenerateContentConfig(
         tools=tools,
