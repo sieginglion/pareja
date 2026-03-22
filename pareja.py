@@ -41,6 +41,7 @@ MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
 MODEL_CLAUDE = "claude-opus-4-6"
 ENABLE_GROK = False
+ENABLE_SEARCH = False
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
@@ -312,7 +313,7 @@ async def first_pass(
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=True,
+            web_search=ENABLE_SEARCH,
         )
         if grok_enabled
         else asyncio.sleep(0, result=("Grok disabled.", 0))
@@ -324,15 +325,21 @@ async def first_pass(
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=True,
+            web_search=ENABLE_SEARCH,
         ),
-        invoke_gemini(gemini_model, q, history, thinking_mode=thinking_mode),
+        invoke_gemini(
+            gemini_model,
+            q,
+            history,
+            thinking_mode=thinking_mode,
+            web_search=ENABLE_SEARCH,
+        ),
         invoke_claude(
             claude_model_name,
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=True,
+            web_search=ENABLE_SEARCH,
         ),
         grok_call,
     )
@@ -374,10 +381,13 @@ async def synthesize_final(
 {chr(10).join(response_blocks)}
 The above are responses to the prompt. Merge them. If there are major conflicts, list them.
 """
-    # For synthesis, we can use the same invoke_gpt mechanism
-    # web_search=False for synthesis usually
+    # Synthesis should only merge the first-pass answers, so search stays off here.
     text, _ = await invoke_gpt(
-        gpt_model, prompt, history, thinking_mode=thinking_mode, web_search=False
+        gpt_model,
+        prompt,
+        history,
+        thinking_mode=thinking_mode,
+        web_search=False,
     )
     return text
 
