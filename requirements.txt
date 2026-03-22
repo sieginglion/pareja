@@ -1,5 +1,6 @@
-langchain-openai
-langchain-core
-python-dotenv
-
+anthropic
 chainlit
+google-genai
+openai
+python-dotenv
+xai-sdk

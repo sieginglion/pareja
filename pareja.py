@@ -3,14 +3,14 @@
 two_llm_synth_chainlit.py
 
 Simplified flow:
-  1) Ask GPT and Gemini the question.
-  2) Pass both answers to GPT as reference.
+  1) Ask GPT, Gemini, Grok, and Claude the question.
+  2) Pass all answers to GPT as reference.
   3) Take GPT's synthesis as the final answer.
 
 Uses Chainlit for the UI.
 
 Requires:
-  pip install langchain-openai langchain-core python-dotenv chainlit
+  pip install python-dotenv chainlit anthropic
   export OPENAI_API_KEY=...
 """
 
@@ -18,6 +18,7 @@ import asyncio
 import os
 from typing import Dict, List, Tuple
 
+import anthropic
 import chainlit as cl
 from dotenv import load_dotenv
 from google import genai
@@ -38,6 +39,8 @@ SYSTEM_PROMPT = "You are a buy-side analyst."
 MODEL_GPT_BASE = "gpt-5.4"
 MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
+MODEL_CLAUDE = "claude-opus-4-6"
+ENABLE_GROK = False
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
@@ -73,8 +76,8 @@ async def invoke_gpt(
     model: str,
     question: str,
     history: List[HistoryItem],
+    thinking_mode: bool = False,
     web_search: bool = True,
-    reasoning_effort: str = None,
 ) -> Tuple[str, int]:
     """
     Invoke GPT using AsyncOpenAI SDK responses.create
@@ -106,8 +109,7 @@ async def invoke_gpt(
     if web_search:
         create_kwargs["tools"] = [{"type": "web_search"}]
 
-    if reasoning_effort:
-        create_kwargs["reasoning"] = {"effort": reasoning_effort}
+    create_kwargs["reasoning"] = {"effort": "high" if thinking_mode else "low"}
 
     try:
         # Note: 'responses' is experimental/specific to the user's provider (OpenAI-next)
@@ -143,6 +145,7 @@ async def invoke_grok(
     model: str,
     question: str,
     history: List[HistoryItem],
+    thinking_mode: bool = False,
     web_search: bool = True,
 ) -> Tuple[str, int]:
     """
@@ -196,7 +199,7 @@ async def invoke_gemini(
     model: str,
     question: str,
     history: List[HistoryItem],
-    thinking_mode: bool,
+    thinking_mode: bool = False,
     web_search: bool = True,
 ) -> Tuple[str, int]:
     """
@@ -207,7 +210,7 @@ async def invoke_gemini(
         api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        return "Error: GEMINI_API_KEY/GOOGLE_API_KEY not found."
+        return "Error: GEMINI_API_KEY/GOOGLE_API_KEY not found.", 0
 
     client = genai.Client(api_key=api_key)
 
@@ -258,35 +261,82 @@ async def invoke_gemini(
         return f"Error invoking Gemini: {e}", 0
 
 
+async def invoke_claude(
+    model: str,
+    question: str,
+    history: List[Tuple[str, str]],
+    thinking_mode: bool = False,
+    web_search: bool = True,
+) -> Tuple[str, int]:
+    client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+
+    messages = []
+    for q, a in history:
+        messages.append({"role": "user", "content": q})
+        messages.append({"role": "assistant", "content": a})
+    messages.append({"role": "user", "content": question})
+
+    kwargs = {
+        "model": model,
+        "system": SYSTEM_PROMPT,
+        "max_tokens": 16384,
+        "messages": messages,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high" if thinking_mode else "low"},
+    }
+
+    if web_search:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search"}]
+
+    try:
+        response = await client.messages.create(**kwargs)
+        text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+        return text, getattr(response.usage, "output_tokens", 0)
+    except Exception as e:
+        return f"Error: {e}", 0
+
+
 async def first_pass(
     gpt_model_name: str,
-    gpt_reasoning_effort: str,
     gemini_model: str,
-    gemini_thinking: bool,
+    thinking_mode: bool,
+    claude_model_name: str,
+    grok_enabled: bool,
     grok_model_name: str,
     q: str,
     history: List[HistoryItem],
-) -> Tuple[Tuple[str, int], Tuple[str, int], Tuple[str, int]]:
-    # Run three distinct models in parallel
-    # Note: invoke_gpt is synchronous in the user example (client.responses.create)
-    # wraps in to_thread for non-blocking async
-    a0, b0, c0 = await asyncio.gather(
-        invoke_gpt(
-            gpt_model_name,
-            q,
-            history,
-            web_search=True,
-            reasoning_effort=gpt_reasoning_effort,
-        ),
-        invoke_gemini(gemini_model, q, history, gemini_thinking),
+) -> Tuple[Tuple[str, int], Tuple[str, int], Tuple[str, int], Tuple[str, int]]:
+    grok_call = (
         invoke_grok(
             grok_model_name,
             q,
             history,
+            thinking_mode=thinking_mode,
+            web_search=True,
+        )
+        if grok_enabled
+        else asyncio.sleep(0, result=("Grok disabled.", 0))
+    )
+
+    a0, b0, c0, d0 = await asyncio.gather(
+        invoke_gpt(
+            gpt_model_name,
+            q,
+            history,
+            thinking_mode=thinking_mode,
             web_search=True,
         ),
+        invoke_gemini(gemini_model, q, history, thinking_mode=thinking_mode),
+        invoke_claude(
+            claude_model_name,
+            q,
+            history,
+            thinking_mode=thinking_mode,
+            web_search=True,
+        ),
+        grok_call,
     )
-    return a0, b0, c0
+    return a0, b0, c0, d0
 
 
 async def synthesize_final(
@@ -295,27 +345,39 @@ async def synthesize_final(
     answer_a0: str,
     answer_b0: str,
     answer_c0: str,
+    answer_d0: str,
+    grok_enabled: bool,
     history: List[HistoryItem],
-    reasoning_effort: str = None,
+    thinking_mode: bool = False,
 ) -> str:
+    response_blocks = [
+        f"""<response model="gpt">
+{answer_a0}
+</response>""",
+        f"""<response model="gemini">
+{answer_b0}
+</response>""",
+        f"""<response model="claude">
+{answer_c0}
+</response>""",
+    ]
+    if grok_enabled:
+        response_blocks.append(
+            f"""<response model="grok">
+{answer_d0}
+</response>"""
+        )
+
     prompt = f"""<prompt>
 {question}
 </prompt>
-<response model="gpt">
-{answer_a0}
-</response>
-<response model="gemini">
-{answer_b0}
-</response>
-<response model="grok">
-{answer_c0}
-</response>
-The above are three responses to the prompt. Merge them. If there are major conflicts, list them.
+{chr(10).join(response_blocks)}
+The above are responses to the prompt. Merge them. If there are major conflicts, list them.
 """
     # For synthesis, we can use the same invoke_gpt mechanism
     # web_search=False for synthesis usually
     text, _ = await invoke_gpt(
-        gpt_model, prompt, history, web_search=False, reasoning_effort=reasoning_effort
+        gpt_model, prompt, history, thinking_mode=thinking_mode, web_search=False
     )
     return text
 
@@ -346,23 +408,18 @@ async def main(message: cl.Message):
     else:
         q = raw
 
-    # Build LLMs
-    # gpt = _make_llm(MODEL_GPT_BASE, thinking_mode) # NO longer used via LangChain
-    # gemini = _make_llm(MODEL_GEMINI, thinking_mode) # NO longer used via LangChain
-
+    grok_enabled = ENABLE_GROK
     grok_model = MODEL_GROK_BASE
-
-    gpt_reasoning = "medium" if thinking_mode else "none"
-
-    # gpt_synth = _make_llm(MODEL_GPT_BASE, thinking=False, web_search=False) # No longer used
+    claude_model = MODEL_CLAUDE
 
     # Step 1: First Pass
     async with cl.Step(name="Step 1") as step:
-        res_a0, res_b0, res_c0 = await first_pass(
+        res_a0, res_b0, res_c0, res_d0 = await first_pass(
             MODEL_GPT_BASE,
-            gpt_reasoning,
             MODEL_GEMINI,
             thinking_mode,
+            claude_model,
+            grok_enabled,
             grok_model,
             q,
             history,
@@ -370,7 +427,15 @@ async def main(message: cl.Message):
         a0, t_a0 = res_a0
         b0, t_b0 = res_b0
         c0, t_c0 = res_c0
-        step.output = f'# gpt (reasoning: {t_a0})\n{a0}\n\n# gemini (reasoning: {t_b0})\n{b0}\n\n# grok (reasoning: {t_c0})\n{c0}'
+        d0, t_d0 = res_d0
+        step_output_parts = [
+            f'# gpt (reasoning_tokens: {t_a0})\n{a0}',
+            f'# gemini (thoughts_token_count: {t_b0})\n{b0}',
+            f'# claude (output_tokens: {t_c0})\n{c0}',
+        ]
+        if grok_enabled:
+            step_output_parts.append(f'# grok (reasoning_tokens: {t_d0})\n{d0}')
+        step.output = "\n\n".join(step_output_parts)
 
     # Send intermediate outputs as their own messages if preferred,
     # but Elements are cleaner for "First Pass" content to avoid clutter.
@@ -388,7 +453,15 @@ async def main(message: cl.Message):
     # Step 2: Synthesis
     async with cl.Step(name="Step 2") as step:
         final = await synthesize_final(
-            MODEL_GPT_BASE, q, a0, b0, c0, history, reasoning_effort=gpt_reasoning
+            MODEL_GPT_BASE,
+            q,
+            a0,
+            b0,
+            c0,
+            d0,
+            grok_enabled,
+            history,
+            thinking_mode=False,
         )
         step.output = "Done"
 
