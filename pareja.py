@@ -32,7 +32,7 @@ from xai_sdk.tools import x_search
 # Load env immediately
 load_dotenv()
 
-SYSTEM_PROMPT = "You are a buy-side analyst."
+# SYSTEM_PROMPT = "You are a buy-side analyst."
 
 # --- Model variants ---
 # --- Model variants ---
@@ -103,7 +103,7 @@ async def invoke_gpt(
     # Build kwargs dynamically to omit tools if not needed (best practice)
     create_kwargs = {
         "model": model,
-        "instructions": SYSTEM_PROMPT,
+        # "instructions": SYSTEM_PROMPT,
         "input": messages,
     }
 
@@ -172,7 +172,7 @@ async def invoke_grok(
         chat = client.chat.create(**create_kwargs)
 
         # Add system prompt
-        chat.append(system(SYSTEM_PROMPT))
+        # chat.append(system(SYSTEM_PROMPT))
 
         for q_hist, a_hist in history:
             chat.append(user(q_hist))
@@ -225,7 +225,7 @@ async def invoke_gemini(
     config = types.GenerateContentConfig(
         tools=tools,
         thinking_config=types.ThinkingConfig(thinking_level=t_level),
-        system_instruction=SYSTEM_PROMPT,
+        # system_instruction=SYSTEM_PROMPT,
     )
 
     # Construct History + Prompt using structured Content objects
@@ -279,7 +279,7 @@ async def invoke_claude(
 
     kwargs = {
         "model": model,
-        "system": SYSTEM_PROMPT,
+        # "system": SYSTEM_PROMPT,
         "max_tokens": 16384,
         "messages": messages,
         "thinking": {"type": "adaptive"},
