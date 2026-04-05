@@ -32,7 +32,7 @@ from xai_sdk.tools import x_search
 # Load env immediately
 load_dotenv()
 
-# SYSTEM_PROMPT = "You are a buy-side analyst."
+# SYSTEM_PROMPT = "You are an equity research analyst"
 
 # --- Model variants ---
 # --- Model variants ---
@@ -41,7 +41,6 @@ MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
 MODEL_CLAUDE = "claude-opus-4-6"
 ENABLE_GROK = False
-ENABLE_SEARCH = False
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
@@ -78,7 +77,7 @@ async def invoke_gpt(
     question: str,
     history: List[HistoryItem],
     thinking_mode: bool = False,
-    web_search: bool = True,
+    web_search: bool = False,
 ) -> Tuple[str, int]:
     """
     Invoke GPT using AsyncOpenAI SDK responses.create
@@ -147,7 +146,7 @@ async def invoke_grok(
     question: str,
     history: List[HistoryItem],
     thinking_mode: bool = False,
-    web_search: bool = True,
+    web_search: bool = False,
 ) -> Tuple[str, int]:
     """
     Invoke Grok using xAI SDK directly.
@@ -201,7 +200,7 @@ async def invoke_gemini(
     question: str,
     history: List[HistoryItem],
     thinking_mode: bool = False,
-    web_search: bool = True,
+    web_search: bool = False,
 ) -> Tuple[str, int]:
     """
     Invoke Gemini using google-genai SDK.
@@ -267,7 +266,7 @@ async def invoke_claude(
     question: str,
     history: List[Tuple[str, str]],
     thinking_mode: bool = False,
-    web_search: bool = True,
+    web_search: bool = False,
 ) -> Tuple[str, int]:
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
@@ -301,6 +300,7 @@ async def first_pass(
     gpt_model_name: str,
     gemini_model: str,
     thinking_mode: bool,
+    search_enabled: bool,
     claude_model_name: str,
     grok_enabled: bool,
     grok_model_name: str,
@@ -313,7 +313,7 @@ async def first_pass(
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=ENABLE_SEARCH,
+            web_search=search_enabled,
         )
         if grok_enabled
         else asyncio.sleep(0, result=("Grok disabled.", 0))
@@ -325,21 +325,21 @@ async def first_pass(
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=ENABLE_SEARCH,
+            web_search=search_enabled,
         ),
         invoke_gemini(
             gemini_model,
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=ENABLE_SEARCH,
+            web_search=search_enabled,
         ),
         invoke_claude(
             claude_model_name,
             q,
             history,
             thinking_mode=thinking_mode,
-            web_search=ENABLE_SEARCH,
+            web_search=search_enabled,
         ),
         grok_call,
     )
@@ -379,15 +379,14 @@ async def synthesize_final(
 {question}
 </prompt>
 {chr(10).join(response_blocks)}
-The above are responses to the prompt. Merge them. If there are major conflicts, list them.
+Here are responses to the prompt. Merge them into a single coherent one. List any major conflicts.
 """
     # Synthesis should only merge the first-pass answers, so search stays off here.
     text, _ = await invoke_gpt(
         gpt_model,
         prompt,
         history,
-        thinking_mode=thinking_mode,
-        web_search=False,
+        thinking_mode,
     )
     return text
 
@@ -407,16 +406,33 @@ async def main(message: cl.Message):
 
     raw = message.content.strip()
 
-    # Check for /think prefix
-    thinking_mode = raw.startswith("/think")
+    thinking_mode = False
+    search_enabled = False
+    q = raw
+
+    # Support command prefixes in any order, e.g. /think /search ...
+    while True:
+        if q.startswith("/think"):
+            thinking_mode = True
+            q = q[6:].strip()
+            continue
+        if q.startswith("/search"):
+            search_enabled = True
+            q = q[7:].strip()
+            continue
+        break
+
+    if not q:
+        await cl.Message(content="Usage: /think /search <your question>").send()
+        return
+
+    status_parts = []
     if thinking_mode:
-        q = raw[6:].strip()
-        if not q:
-            await cl.Message(content="Usage: /think <your question>").send()
-            return
-        await cl.Message(content="🧠 **Reasoning mode enabled**").send()
-    else:
-        q = raw
+        status_parts.append("🧠 **Reasoning mode enabled**")
+    if search_enabled:
+        status_parts.append("🔎 **Web search enabled**")
+    if status_parts:
+        await cl.Message(content="\n".join(status_parts)).send()
 
     grok_enabled = ENABLE_GROK
     grok_model = MODEL_GROK_BASE
@@ -428,6 +444,7 @@ async def main(message: cl.Message):
             MODEL_GPT_BASE,
             MODEL_GEMINI,
             thinking_mode,
+            search_enabled,
             claude_model,
             grok_enabled,
             grok_model,
@@ -471,7 +488,7 @@ async def main(message: cl.Message):
             d0,
             grok_enabled,
             history,
-            thinking_mode=False,
+            thinking_mode=thinking_mode,
         )
         step.output = "Done"
 
