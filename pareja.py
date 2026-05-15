@@ -36,10 +36,10 @@ load_dotenv()
 
 # --- Model variants ---
 # --- Model variants ---
-MODEL_GPT_BASE = "gpt-5.4"
+MODEL_GPT_BASE = "gpt-5.5"
 MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
-MODEL_CLAUDE = "claude-opus-4-6"
+MODEL_CLAUDE = "claude-opus-4-7"
 ENABLE_GROK = False
 
 HistoryItem = Tuple[str, str]  # (q, final)
@@ -369,17 +369,15 @@ async def synthesize_final(
 </response>""",
     ]
     if grok_enabled:
-        response_blocks.append(
-            f"""<response model="grok">
+        response_blocks.append(f"""<response model="grok">
 {answer_d0}
-</response>"""
-        )
+</response>""")
 
     prompt = f"""<prompt>
 {question}
 </prompt>
 {chr(10).join(response_blocks)}
-Here are responses to the prompt. Merge them into a single coherent one. List any major conflicts.
+Here are responses to the prompt. Merge them into a coherent one. List any major conflicts.
 """
     # Synthesis should only merge the first-pass answers, so search stays off here.
     text, _ = await invoke_gpt(
