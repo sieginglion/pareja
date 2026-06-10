@@ -39,7 +39,7 @@ load_dotenv()
 MODEL_GPT_BASE = "gpt-5.5"
 MODEL_GEMINI = "gemini-3.1-pro-preview"
 MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
-MODEL_CLAUDE = "claude-opus-4-7"
+MODEL_CLAUDE = "claude-opus-4-8"
 ENABLE_GROK = False
 
 HistoryItem = Tuple[str, str]  # (q, final)
