@@ -36,11 +36,11 @@ load_dotenv()
 
 # --- Model variants ---
 # --- Model variants ---
-MODEL_GPT_BASE = "gpt-5.5"
+MODEL_GPT_BASE = "gpt-5.6-terra"
 MODEL_GEMINI = "gemini-3.1-pro-preview"
-MODEL_GROK_BASE = "grok-4-1-fast-non-reasoning"
+MODEL_GROK_BASE = "grok-4.5"
 MODEL_CLAUDE = "claude-opus-4-8"
-ENABLE_GROK = False
+ENABLE_GROK = True
 
 HistoryItem = Tuple[str, str]  # (q, final)
 
@@ -76,7 +76,6 @@ async def invoke_gpt(
     model: str,
     question: str,
     history: List[HistoryItem],
-    thinking_mode: bool = False,
     web_search: bool = False,
 ) -> Tuple[str, int]:
     """
@@ -109,7 +108,7 @@ async def invoke_gpt(
     if web_search:
         create_kwargs["tools"] = [{"type": "web_search"}]
 
-    create_kwargs["reasoning"] = {"effort": "high" if thinking_mode else "low"}
+    create_kwargs["reasoning"] = {"effort": "xhigh"}
 
     try:
         # Note: 'responses' is experimental/specific to the user's provider (OpenAI-next)
@@ -145,7 +144,6 @@ async def invoke_grok(
     model: str,
     question: str,
     history: List[HistoryItem],
-    thinking_mode: bool = False,
     web_search: bool = False,
 ) -> Tuple[str, int]:
     """
@@ -166,6 +164,7 @@ async def invoke_grok(
         create_kwargs = {
             "model": model,
             "tools": tools,
+            "reasoning_effort": "high",
         }
 
         chat = client.chat.create(**create_kwargs)
@@ -199,7 +198,6 @@ async def invoke_gemini(
     model: str,
     question: str,
     history: List[HistoryItem],
-    thinking_mode: bool = False,
     web_search: bool = False,
 ) -> Tuple[str, int]:
     """
@@ -219,7 +217,7 @@ async def invoke_gemini(
     if web_search:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-    t_level = types.ThinkingLevel.HIGH if thinking_mode else types.ThinkingLevel.LOW
+    t_level = types.ThinkingLevel.HIGH
 
     config = types.GenerateContentConfig(
         tools=tools,
@@ -265,7 +263,6 @@ async def invoke_claude(
     model: str,
     question: str,
     history: List[Tuple[str, str]],
-    thinking_mode: bool = False,
     web_search: bool = False,
 ) -> Tuple[str, int]:
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
@@ -282,7 +279,7 @@ async def invoke_claude(
         "max_tokens": 16384,
         "messages": messages,
         "thinking": {"type": "adaptive"},
-        "output_config": {"effort": "high" if thinking_mode else "low"},
+        "output_config": {"effort": "xhigh"},
     }
 
     if web_search:
@@ -299,7 +296,6 @@ async def invoke_claude(
 async def first_pass(
     gpt_model_name: str,
     gemini_model: str,
-    thinking_mode: bool,
     search_enabled: bool,
     claude_model_name: str,
     grok_enabled: bool,
@@ -312,7 +308,6 @@ async def first_pass(
             grok_model_name,
             q,
             history,
-            thinking_mode=thinking_mode,
             web_search=search_enabled,
         )
         if grok_enabled
@@ -324,21 +319,18 @@ async def first_pass(
             gpt_model_name,
             q,
             history,
-            thinking_mode=thinking_mode,
             web_search=search_enabled,
         ),
         invoke_gemini(
             gemini_model,
             q,
             history,
-            thinking_mode=thinking_mode,
             web_search=search_enabled,
         ),
         invoke_claude(
             claude_model_name,
             q,
             history,
-            thinking_mode=thinking_mode,
             web_search=search_enabled,
         ),
         grok_call,
@@ -355,7 +347,6 @@ async def synthesize_final(
     answer_d0: str,
     grok_enabled: bool,
     history: List[HistoryItem],
-    thinking_mode: bool = False,
 ) -> str:
     response_blocks = [
         f"""<response model="gpt">
@@ -384,7 +375,6 @@ Here are responses to the prompt. Merge them into a coherent one. List any major
         gpt_model,
         prompt,
         history,
-        thinking_mode,
     )
     return text
 
@@ -404,29 +394,18 @@ async def main(message: cl.Message):
 
     raw = message.content.strip()
 
-    thinking_mode = False
     search_enabled = False
     q = raw
 
-    # Support command prefixes in any order, e.g. /think /search ...
-    while True:
-        if q.startswith("/think"):
-            thinking_mode = True
-            q = q[6:].strip()
-            continue
-        if q.startswith("/search"):
-            search_enabled = True
-            q = q[7:].strip()
-            continue
-        break
+    if q.startswith("/search"):
+        search_enabled = True
+        q = q[7:].strip()
 
     if not q:
-        await cl.Message(content="Usage: /think /search <your question>").send()
+        await cl.Message(content="Usage: /search <your question>").send()
         return
 
     status_parts = []
-    if thinking_mode:
-        status_parts.append("🧠 **Reasoning mode enabled**")
     if search_enabled:
         status_parts.append("🔎 **Web search enabled**")
     if status_parts:
@@ -441,7 +420,6 @@ async def main(message: cl.Message):
         res_a0, res_b0, res_c0, res_d0 = await first_pass(
             MODEL_GPT_BASE,
             MODEL_GEMINI,
-            thinking_mode,
             search_enabled,
             claude_model,
             grok_enabled,
@@ -486,7 +464,6 @@ async def main(message: cl.Message):
             d0,
             grok_enabled,
             history,
-            thinking_mode=thinking_mode,
         )
         step.output = "Done"
 
