@@ -368,7 +368,7 @@ async def synthesize_final(
 {question}
 </prompt>
 {chr(10).join(response_blocks)}
-Here are responses to the prompt. Merge them into a coherent one. List any major conflicts.
+Merge the responses into a coherent one. List any major conflicts.
 """
     # Synthesis should only merge the first-pass answers, so search stays off here.
     text, _ = await invoke_gpt(
