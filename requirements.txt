@@ -2,5 +2,7 @@ anthropic
 chainlit
 google-genai
 openai
+PyMuPDF
 python-dotenv
 xai-sdk
+pydantic
