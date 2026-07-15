@@ -50,6 +50,10 @@ class GPTInvocationError(RuntimeError):
     """Raised when GPT cannot provide a usable response for a required step."""
 
 
+class ClaudeInvocationError(RuntimeError):
+    """Raised when Claude cannot provide a usable response for a required step."""
+
+
 @dataclass(frozen=True)
 class Models:
     gpt: str
@@ -77,8 +81,7 @@ async def invoke_gpt(
     messages.append({"role": "user", "content": question})
 
     async def request() -> Tuple[str, int]:
-        # Disable SDK retries so every GPT request is attempted exactly once.
-        async with AsyncOpenAI(api_key=api_key, max_retries=0) as client:
+        async with AsyncOpenAI(api_key=api_key) as client:
             response = await client.responses.create(
                 model=model,
                 input=messages,
@@ -187,6 +190,10 @@ async def invoke_grok(
 async def invoke_claude(
     model: str, question: str, history: Sequence[HistoryItem]
 ) -> Tuple[str, int]:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise ClaudeInvocationError("ANTHROPIC_API_KEY is required.")
+
     messages = []
     for prior_question, prior_answer in history:
         messages.append({"role": "user", "content": prior_question})
@@ -194,25 +201,31 @@ async def invoke_claude(
     messages.append({"role": "user", "content": question})
 
     async def request() -> Tuple[str, int]:
-        client = anthropic.AsyncAnthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY", ""), max_retries=0
-        )
-        response = await client.messages.create(
-            model=model,
-            max_tokens=16384,
-            messages=messages,
-            thinking={"type": "adaptive"},
-            output_config={"effort": "xhigh"},
-        )
+        async with anthropic.AsyncAnthropic(api_key=api_key) as client:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=16384,
+                messages=messages,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "xhigh"},
+            )
+        if response.stop_reason != "end_turn":
+            raise ClaudeInvocationError(
+                f"Claude response stopped with {response.stop_reason!r}."
+            )
         text = "\n".join(
             block.text for block in response.content if block.type == "text"
         ).strip()
+        if not text:
+            raise ClaudeInvocationError("Claude response contained no text.")
         return text, getattr(response.usage, "output_tokens", 0)
 
     try:
         return await request()
+    except ClaudeInvocationError:
+        raise
     except Exception as exc:
-        return f"Error invoking Claude: {exc}", 0
+        raise ClaudeInvocationError(f"Error invoking Anthropic API: {exc}") from exc
 
 
 async def call_llm(
@@ -341,7 +354,7 @@ def main() -> int:
     args = parse_args()
     try:
         print(asyncio.run(run(args)))
-    except (ValueError, csv.Error, GPTInvocationError) as exc:
+    except (ValueError, csv.Error, GPTInvocationError, ClaudeInvocationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     return 0
